@@ -17,8 +17,13 @@ from agents import (
     ToolOutputImage,
     OpenAIResponsesModel,
     set_tracing_disabled,
+    RunHooks,
 )
-from openai.types.responses import ResponseTextDeltaEvent
+from openai.types.responses import (
+    ResponseTextDeltaEvent,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
+)
 from dotenv import load_dotenv
 from PIL import Image
 from openai import AsyncAzureOpenAI
@@ -28,7 +33,10 @@ load_dotenv()
 set_tracing_disabled(True)
 logger.remove()
 logger.add(
-    lambda msg: print(msg, end=""), format="<level>{message}</level>", colorize=True
+    lambda msg: print(msg, end=""),
+    format="<level>{message}</level>",
+    colorize=True,
+    level="DEBUG",  # DEBUG to see all events, INFO for normal operation
 )
 
 client = AsyncAzureOpenAI(
@@ -155,6 +163,47 @@ def create_tools(api: RobotAPI):
     return [move_forward, move_backward, turn_left, turn_right, stop_motors, get_status]
 
 
+class ContextPruningHooks(RunHooks):
+    """Prune context to keep only recent moves and a summary of older ones."""
+
+    def __init__(self, keep_recent_turns: int = 5):
+        self.keep_recent_turns = keep_recent_turns
+        self.move_history = []
+
+    async def on_run_turn_done(self, context, result):
+        """After each turn, prune the context window."""
+        # Track movements
+        for item in result.new_items:
+            if hasattr(item, "type") and item.type == "tool_call_item":
+                tool_name = item.name if hasattr(item, "name") else "unknown"
+                if tool_name in [
+                    "move_forward",
+                    "move_backward",
+                    "turn_left",
+                    "turn_right",
+                ]:
+                    self.move_history.append(tool_name)
+
+        # If we have more than keep_recent_turns worth of context, prune
+        if (
+            len(result.all_items) > self.keep_recent_turns * 4
+        ):  # ~4 items per turn (tool call + output + message)
+            # Keep initial message, recent items, and inject a summary
+            total_items = len(result.all_items)
+            keep_recent = self.keep_recent_turns * 4
+
+            # Create summary of pruned moves
+            pruned_count = total_items - keep_recent - 1
+            if pruned_count > 0:
+                summary = f"[Context pruned: {pruned_count} items removed. Recent moves: {', '.join(self.move_history[-10:])}]"
+                logger.info(f"🔄 {summary}")
+
+            # Prune: keep first item (initial photo+task) and recent items
+            result.all_items = [result.all_items[0]] + result.all_items[-keep_recent:]
+
+        return result
+
+
 async def run_robot_agent(robot_ip: str, task: str):
     """Run the robot control agent."""
     api = RobotAPI(robot_ip)
@@ -170,20 +219,20 @@ async def run_robot_agent(robot_ip: str, task: str):
         - ALL movement commands automatically return a photo of the new location/orientation.
         - You will receive an initial photo at the start showing the current view.
         - Use the photos returned from movements to understand what the robot sees and plan next actions.
-        - DO NOT request additional photos - every movement gives you visual feedback automatically.
+        - Older context may be pruned to maintain performance - rely on recent photos for current state.
 
         Task approach:
-        1. Analyze the initial photo to understand starting position
-        2. Break task into logical movement steps
+        1. Analyze the current/most recent photo to understand position
+        2. Plan 1-2 moves ahead based on what you see
         3. Execute movements and observe returned photos
-        4. Adjust strategy based on visual feedback
+        4. Adjust strategy based on latest visual feedback
 
         Duration guidelines:
         - Short: 200-500ms | Medium: 500-1500ms | Long: 1500-3000ms
         - Turns: 250ms (~45-60°) | 90° turns: 400-500ms
         - Robot has momentum - for precise short turns use as low as 50ms""",
         tools=create_tools(api),
-        model=OpenAIResponsesModel(model="gpt-5-nano", openai_client=client),
+        model=OpenAIResponsesModel(model="gpt-5", openai_client=client),
     )
 
     print(
@@ -208,25 +257,96 @@ async def run_robot_agent(robot_ip: str, task: str):
         ],
     }
 
-    result_stream = Runner.run_streamed(agent, [message_input], max_turns=100)
+    # Use context pruning to prevent slowdowns
+    hooks = ContextPruningHooks(keep_recent_turns=5)
+    result_stream = Runner.run_streamed(
+        agent, [message_input], max_turns=100, hooks=hooks
+    )
 
     print("\n💭 Agent Thinking:\n" + "-" * 60)
+
+    # Track if we've seen any text output
+    seen_text = False
+
     async for event in result_stream.stream_events():
-        # Stream agent thinking token-by-token
-        if event.type == "raw_response_event" and isinstance(
-            event.data, ResponseTextDeltaEvent
-        ):
-            print(event.data.delta, end="", flush=True)
+        # Print ALL events for debugging
+        logger.debug(
+            f"Event: {event.type} | Data: {type(event.data).__name__ if hasattr(event, 'data') else 'N/A'}"
+        )
+
+        if event.type == "raw_response_event":
+            # Stream reasoning tokens (internal thinking)
+            if isinstance(event.data, ResponseReasoningTextDeltaEvent):
+                print(
+                    f"\033[2m{event.data.delta}\033[0m", end="", flush=True
+                )  # Dim text for reasoning
+                seen_text = True
+
+            # Stream reasoning summary
+            elif isinstance(event.data, ResponseReasoningSummaryTextDeltaEvent):
+                print(
+                    f"\033[36m{event.data.delta}\033[0m", end="", flush=True
+                )  # Cyan for summary
+                seen_text = True
+
+            # Stream agent output token-by-token
+            elif isinstance(event.data, ResponseTextDeltaEvent):
+                print(event.data.delta, end="", flush=True)
+                seen_text = True
 
         # Show tool calls as they happen
         elif event.type == "run_item_stream_event":
-            if event.item.type == "tool_call_item":
+            logger.debug(f"Item type: {event.item.type}")
+
+            if event.item.type == "reasoning_item":
+                # Extract reasoning content from the item
+                reasoning_text = None
+                if hasattr(event.item, "content"):
+                    content = event.item.content
+                    # Content might be a list of content parts
+                    if isinstance(content, list):
+                        reasoning_text = "".join([
+                            part.get("text", "") if isinstance(part, dict) else str(part)
+                            for part in content
+                        ])
+                    elif isinstance(content, str):
+                        reasoning_text = content
+                    else:
+                        reasoning_text = str(content)
+
+                if reasoning_text and reasoning_text.strip():
+                    print(f"\n\033[2m💭 {reasoning_text}\033[0m\n", flush=True)
+                    seen_text = True
+                else:
+                    # Debug: show what we got
+                    logger.debug(f"reasoning_item content: {event.item.content if hasattr(event.item, 'content') else 'NO CONTENT'}")
+
+            elif event.item.type == "tool_call_item":
                 tool_name = (
                     event.item.name if hasattr(event.item, "name") else "unknown"
                 )
-                print(f"\n[Calling: {tool_name}]", flush=True)
+                # Add newline only if we've printed text before
+                if seen_text:
+                    print()
+                print(f"🔧 [{tool_name}] ", end="", flush=True)
+                seen_text = False
             elif event.item.type == "tool_call_output_item":
-                print(" ✓", flush=True)
+                print("✓", flush=True)
+            elif event.item.type == "message_output_item":
+                # Extract and show any text content from the message
+                if hasattr(event.item, "content") and event.item.content:
+                    message_text = (
+                        event.item.content
+                        if isinstance(event.item.content, str)
+                        else str(event.item.content)
+                    )
+                    if message_text and message_text.strip():
+                        print(f"\n💬 {message_text}", flush=True)
+                        seen_text = True
+                # Agent's message completed - add separator
+                elif seen_text:
+                    print("\n", end="", flush=True)
+                    seen_text = False
 
     print(
         f"\n{'-' * 60}\n\n{'=' * 60}\n📋 Final Response:\n{'=' * 60}\n{result_stream.final_output}\n{'=' * 60}\n"
