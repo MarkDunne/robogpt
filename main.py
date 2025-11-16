@@ -57,17 +57,6 @@ class RobotAPI:
             logger.error(f"✗ {endpoint} failed: {e}")
             return f"✗ {endpoint} failed: {e}"
 
-    def get_status(self) -> str:
-        """Get robot status."""
-        try:
-            status = requests.get(
-                f"http://{self.robot_ip}/api/status", timeout=5
-            ).json()
-            camera = "✓" if status.get("camera") else "✗"
-            return f"Camera: {camera} | WiFi: {status.get('wifi', 'Unknown')}"
-        except Exception as e:
-            return f"✗ Failed: {e}"
-
     def capture_photo(self) -> ToolOutputImage:
         """Capture and return photo from robot camera."""
         image = Image.open(
@@ -94,56 +83,76 @@ class RobotAPI:
 
         return ToolOutputImage(image_url=data_url, detail="auto")
 
+    def get_status(self) -> str:
+        """Get robot status."""
+        try:
+            status = requests.get(
+                f"http://{self.robot_ip}/api/status", timeout=5
+            ).json()
+            camera = "✓" if status.get("camera") else "✗"
+            return f"Camera: {camera} | WiFi: {status.get('wifi', 'Unknown')}"
+        except Exception as e:
+            return f"✗ Failed: {e}"
+
 
 def create_tools(api: RobotAPI):
     """Create function tools from RobotAPI instance."""
 
     @function_tool
-    def move_forward(duration: Annotated[int, "Duration in ms (50-5000)"] = 500) -> str:
-        """Move robot forward."""
-        return api.call("motor/forward", duration=duration)
+    def move_forward(
+        duration: Annotated[int, "Duration in ms (50-5000)"] = 500,
+    ) -> ToolOutputImage:
+        """Move robot forward and return photo of new location."""
+        api.call("motor/forward", duration=duration)
+        import time
+
+        time.sleep(0.2)  # Wait for robot to settle
+        return api.capture_photo()
 
     @function_tool
     def move_backward(
         duration: Annotated[int, "Duration in ms (50-5000)"] = 500,
-    ) -> str:
-        """Move robot backward."""
-        return api.call("motor/backward", duration=duration)
+    ) -> ToolOutputImage:
+        """Move robot backward and return photo of new location."""
+        api.call("motor/backward", duration=duration)
+        import time
+
+        time.sleep(0.2)  # Wait for robot to settle
+        return api.capture_photo()
 
     @function_tool
-    def turn_left(duration: Annotated[int, "Duration in ms (50-5000)"] = 250) -> str:
-        """Turn robot left."""
-        return api.call("motor/left", duration=duration)
+    def turn_left(
+        duration: Annotated[int, "Duration in ms (50-5000)"] = 250,
+    ) -> ToolOutputImage:
+        """Turn robot left and return photo of new orientation."""
+        api.call("motor/left", duration=duration)
+        import time
+
+        time.sleep(0.2)  # Wait for robot to settle
+        return api.capture_photo()
 
     @function_tool
-    def turn_right(duration: Annotated[int, "Duration in ms (50-5000)"] = 250) -> str:
-        """Turn robot right."""
-        return api.call("motor/right", duration=duration)
+    def turn_right(
+        duration: Annotated[int, "Duration in ms (50-5000)"] = 250,
+    ) -> ToolOutputImage:
+        """Turn robot right and return photo of new orientation."""
+        api.call("motor/right", duration=duration)
+        import time
+
+        time.sleep(0.2)  # Wait for robot to settle
+        return api.capture_photo()
 
     @function_tool
     def stop_motors() -> str:
-        """Stop all motors."""
+        """Stop all motors immediately."""
         return api.call("motor/stop")
 
     @function_tool
     def get_status() -> str:
-        """Get robot status."""
+        """Get robot system status (camera and WiFi)."""
         return api.get_status()
 
-    @function_tool
-    def capture_photo() -> ToolOutputImage:
-        """Capture and return photo from robot camera."""
-        return api.capture_photo()
-
-    return [
-        move_forward,
-        move_backward,
-        turn_left,
-        turn_right,
-        stop_motors,
-        capture_photo,
-        get_status,
-    ]
+    return [move_forward, move_backward, turn_left, turn_right, stop_motors, get_status]
 
 
 async def run_robot_agent(robot_ip: str, task: str):
@@ -152,39 +161,72 @@ async def run_robot_agent(robot_ip: str, task: str):
 
     agent = Agent(
         name="Robot Controller",
-        instructions="""Intelligent robot control agent for physical robot operations.
+        instructions="""You are an Intelligent robot control agent for physical robot operations.
 
-        Capabilities: Move (forward/backward/left/right, 50-5000ms), stop motors, capture photos, check status.
+        Capabilities: Move (forward/backward/left/right, 50-5000ms), stop motors, check status.
 
-        IMPORTANT: Robot is in a safe environment. Execute commands IMMEDIATELY without asking permission.
+        IMPORTANT BEHAVIOR:
+        - Robot is in a safe environment. Execute commands IMMEDIATELY without asking permission.
+        - ALL movement commands automatically return a photo of the new location/orientation.
+        - You will receive an initial photo at the start showing the current view.
+        - Use the photos returned from movements to understand what the robot sees and plan next actions.
+        - DO NOT request additional photos - every movement gives you visual feedback automatically.
 
         Task approach:
-        1. Break down into logical steps
-        2. Execute commands sequentially with confidence
-        3. Use camera for visual feedback when needed
-        4. Explain actions clearly
+        1. Analyze the initial photo to understand starting position
+        2. Break task into logical movement steps
+        3. Execute movements and observe returned photos
+        4. Adjust strategy based on visual feedback
 
         Duration guidelines:
         - Short: 200-500ms | Medium: 500-1500ms | Long: 1500-3000ms
         - Turns: 250ms (~45-60°) | 90° turns: 400-500ms
-        
-        Note: The robot has momentums so for short turns you might need to reduce the duration to as low as 50ms""",
+        - Robot has momentum - for precise short turns use as low as 50ms""",
         tools=create_tools(api),
-        model=OpenAIResponsesModel(model="gpt-5", openai_client=client),
+        model=OpenAIResponsesModel(model="gpt-5-nano", openai_client=client),
     )
 
     print(
         f"\n{'=' * 60}\n🤖 Robot Control Agent\n{'=' * 60}\nRobot IP: {robot_ip}\nTask: {task}\n{'=' * 60}\n"
     )
 
-    result_stream = Runner.run_streamed(agent, task, max_turns=100)
+    # Capture initial photo and send with task
+    logger.info("📸 Capturing initial robot view...")
+    initial_photo = api.capture_photo()
+
+    # Create a message with image and text content
+    message_input = {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_image",
+                "image_url": initial_photo.image_url,
+                "detail": initial_photo.detail,
+            },
+            {"type": "input_text", "text": f"Here is your current view. Task: {task}"},
+        ],
+    }
+
+    result_stream = Runner.run_streamed(agent, [message_input], max_turns=100)
 
     print("\n💭 Agent Thinking:\n" + "-" * 60)
     async for event in result_stream.stream_events():
+        # Stream agent thinking token-by-token
         if event.type == "raw_response_event" and isinstance(
             event.data, ResponseTextDeltaEvent
         ):
             print(event.data.delta, end="", flush=True)
+
+        # Show tool calls as they happen
+        elif event.type == "run_item_stream_event":
+            if event.item.type == "tool_call_item":
+                tool_name = (
+                    event.item.name if hasattr(event.item, "name") else "unknown"
+                )
+                print(f"\n[Calling: {tool_name}]", flush=True)
+            elif event.item.type == "tool_call_output_item":
+                print(" ✓", flush=True)
 
     print(
         f"\n{'-' * 60}\n\n{'=' * 60}\n📋 Final Response:\n{'=' * 60}\n{result_stream.final_output}\n{'=' * 60}\n"
