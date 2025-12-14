@@ -1,0 +1,59 @@
+# ESP32-S3-CAM Development Justfile
+
+# Default port and board configuration
+port := "/dev/cu.usbserial-110"
+board := "esp32:esp32:esp32s3"
+
+# Board options that work with CH340C on Mac
+# Using QSPI PSRAM (enabled) instead of OPI to avoid WiFi conflicts
+board_options := "PSRAM=enabled,UploadSpeed=115200"
+fqbn := board + ":" + board_options
+
+# Default recipe - show available commands
+default:
+    @just --list
+
+
+# Compile the sketch (sketch_name must match folder name, which must match .ino filename)
+compile sketch_name="microcontroller":
+    arduino-cli compile --fqbn {{fqbn}} {{sketch_name}} --verbose
+
+# Upload to board (compiles first)
+upload sketch_name="microcontroller":
+    just compile {{sketch_name}}
+    arduino-cli upload -p {{port}} --fqbn {{fqbn}} {{sketch_name}} --verbose
+
+# Monitor serial output
+monitor:
+    arduino-cli monitor -p {{port}} -c baudrate=115200
+
+# Compile and upload, then monitor
+run sketch_name="microcontroller":
+    just upload {{sketch_name}}
+    just monitor
+
+# Install ESP32 board support
+install-core:
+    arduino-cli core install esp32:esp32
+
+# Update board index
+update:
+    arduino-cli core update-index
+    arduino-cli core upgrade
+
+# Clean build artifacts
+clean:
+    rm -rf build
+
+# Show board details
+board-info:
+    arduino-cli board details -b {{board}}
+
+# List connected boards
+list-boards:
+    arduino-cli board list
+
+# Full setup from scratch
+setup: install-core
+    @echo "Setup complete! Run 'just run' to compile, upload and monitor."
+    @echo "Usage: just run [sketch_name]  (default: microcontroller)"

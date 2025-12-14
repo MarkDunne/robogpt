@@ -7,9 +7,10 @@ import base64
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import requests
+from pydantic import BaseModel
 from agents import (
     Agent,
     Runner,
@@ -36,7 +37,7 @@ logger.add(
     lambda msg: print(msg, end=""),
     format="<level>{message}</level>",
     colorize=True,
-    level="DEBUG",  # DEBUG to see all events, INFO for normal operation
+    level="INFO",  # DEBUG to see all events, INFO for normal operation
 )
 
 client = AsyncAzureOpenAI(
@@ -160,7 +161,51 @@ def create_tools(api: RobotAPI):
         """Get robot system status (camera and WiFi)."""
         return api.get_status()
 
-    return [move_forward, move_backward, turn_left, turn_right, stop_motors, get_status]
+    class Move(BaseModel):
+        """A single robot movement."""
+        action: Literal["forward", "backward", "left", "right"]
+        duration: int
+
+    @function_tool
+    def execute_moves(
+        moves: Annotated[
+            list[Move],
+            "List of moves to execute. Example: [{'action': 'forward', 'duration': 500}, {'action': 'right', 'duration': 250}]"
+        ]
+    ) -> ToolOutputImage:
+        """Execute a sequence of movements and return photo of final position. Use this for efficient multi-step navigation."""
+        import time
+
+        for i, move in enumerate(moves):
+            action = move.action.lower()
+            duration = move.duration
+
+            # Map action to motor endpoint
+            endpoint_map = {
+                "forward": "motor/forward",
+                "backward": "motor/backward",
+                "left": "motor/left",
+                "right": "motor/right",
+            }
+
+            if action not in endpoint_map:
+                logger.warning(f"Unknown action '{action}' in move {i+1}, skipping")
+                continue
+
+            # Execute the move
+            api.call(endpoint_map[action], duration=duration)
+
+            # Small delay between moves for robot stability
+            if i < len(moves) - 1:  # Don't wait after the last move
+                time.sleep(0.1)
+
+        # Wait for robot to settle after final move
+        time.sleep(0.2)
+
+        # Capture and return final photo
+        return api.capture_photo()
+
+    return [move_forward, move_backward, turn_left, turn_right, stop_motors, get_status, execute_moves]
 
 
 class ContextPruningHooks(RunHooks):
@@ -212,7 +257,7 @@ async def run_robot_agent(robot_ip: str, task: str):
         name="Robot Controller",
         instructions="""You are an Intelligent robot control agent for physical robot operations.
 
-        Capabilities: Move (forward/backward/left/right, 50-5000ms), stop motors, check status.
+        Capabilities: Move (forward/backward/left/right, 50-5000ms), stop motors, check status, execute multiple moves in sequence.
 
         IMPORTANT BEHAVIOR:
         - Robot is in a safe environment. Execute commands IMMEDIATELY without asking permission.
@@ -221,11 +266,18 @@ async def run_robot_agent(robot_ip: str, task: str):
         - Use the photos returned from movements to understand what the robot sees and plan next actions.
         - Older context may be pruned to maintain performance - rely on recent photos for current state.
 
+        EFFICIENCY TIP:
+        - Use execute_moves() to batch 2-4 movements together when you have a clear plan
+        - Example: execute_moves([{'action': 'forward', 'duration': 800}, {'action': 'right', 'duration': 250}])
+        - This is MUCH faster than individual moves but less adaptive
+        - Use single moves when you need to check the environment frequently
+
         Task approach:
         1. Analyze the current/most recent photo to understand position
-        2. Plan 1-2 moves ahead based on what you see
-        3. Execute movements and observe returned photos
-        4. Adjust strategy based on latest visual feedback
+        2. Plan 2-3 moves ahead based on what you see
+        3. If confident, use execute_moves() to batch them
+        4. If uncertain, use single moves and observe photos between
+        5. Adjust strategy based on latest visual feedback
 
         Duration guidelines:
         - Short: 200-500ms | Medium: 500-1500ms | Long: 1500-3000ms
@@ -269,11 +321,6 @@ async def run_robot_agent(robot_ip: str, task: str):
     seen_text = False
 
     async for event in result_stream.stream_events():
-        # Print ALL events for debugging
-        logger.debug(
-            f"Event: {event.type} | Data: {type(event.data).__name__ if hasattr(event, 'data') else 'N/A'}"
-        )
-
         if event.type == "raw_response_event":
             # Stream reasoning tokens (internal thinking)
             if isinstance(event.data, ResponseReasoningTextDeltaEvent):
@@ -296,8 +343,6 @@ async def run_robot_agent(robot_ip: str, task: str):
 
         # Show tool calls as they happen
         elif event.type == "run_item_stream_event":
-            logger.debug(f"Item type: {event.item.type}")
-
             if event.item.type == "reasoning_item":
                 # Extract reasoning content from the item
                 reasoning_text = None
