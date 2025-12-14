@@ -35,10 +35,10 @@
 ### 3. Image Transfer Timeout
 - **Problem**: Browser connection times out when loading image
 - **Solutions Applied**:
-  - Reduced frame size to FRAMESIZE_QQVGA (160x120)
-  - Increased JPEG compression (quality 20)
-  - Implemented chunked transfer (1KB chunks)
-  - Added keep-alive HTTP header
+  - Frame size: FRAMESIZE_VGA (640x480)
+  - JPEG quality: 10 (lower = better quality, range 0-63)
+  - Using 2 frame buffers for smoother capture
+  - Frame buffers stored in PSRAM when available
 
 ## Camera Pin Configuration
 ```cpp
@@ -65,18 +65,11 @@
 - **PSRAM**: 8MB (medium speed, must be enabled in Arduino IDE)
 - **Flash/SPIFFS**: Storage, not for active memory
 
-## Working WiFi AP Configuration
-- **Network Name**: ESP32-CAM
-- **Password**: 12345678
-- **Access URL**: http://192.168.4.1
-- **Mode**: Access Point (no internet needed)
-
-### Why 192.168.4.1?
-- ESP32 automatically assigns itself this IP when in AP mode (hardcoded default)
-- Part of ESP-IDF WiFi stack defaults
-- Uses 192.168.4.x subnet to avoid conflicts with common home routers (192.168.1.x/192.168.0.x)
-- DHCP server assigns clients: 192.168.4.2, 192.168.4.3, etc.
-- Can be changed with `WiFi.softAPConfig()` if needed
+## WiFi Configuration
+- **Mode**: Station (connects to existing WiFi network)
+- **Credentials**: Configured in code (`ssid` and `password` constants)
+- **Connection**: Uses `WiFi.begin()` to connect as a client
+- **IP Address**: Assigned by DHCP from the router, printed to serial on boot
 
 ## Lessons Learned
 1. Always check upload speed when using CH340 chips on Mac

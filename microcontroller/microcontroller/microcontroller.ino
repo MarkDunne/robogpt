@@ -4,7 +4,7 @@
 
 // WiFi credentials
 const char *ssid = "Marks Pixel";
-const char *password = "aijzdipzkafaumi";
+const char *password = "XXXX";
 
 // Motor control pins (motor1 = right, motor2 = left)
 const int motor1_forward = 37;
