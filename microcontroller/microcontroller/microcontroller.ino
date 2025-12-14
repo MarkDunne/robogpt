@@ -6,11 +6,11 @@
 const char *ssid = "Marks Pixel";
 const char *password = "aijzdipzkafaumi";
 
-// Motor control pins (motor1 = left, motor2 = right)
-const int motor1_forward = 21;
-const int motor1_reverse = 48;
-const int motor2_forward = 35;
-const int motor2_reverse = 37;
+// Motor control pins (motor1 = right, motor2 = left)
+const int motor1_forward = 37;
+const int motor1_reverse = 35;
+const int motor2_forward = 39;
+const int motor2_reverse = 42;
 const int motor_pwr = 150;
 const int movement_duration = 500;
 
@@ -57,6 +57,35 @@ void setup() {
   camera_initialized = initCamera();
   if (camera_initialized) {
     Serial.println("Camera OK");
+    
+    // TEMPORARILY DISABLED: Boot photo capture for testing
+    // Take a test photo on boot and send first 100 bytes to serial
+    /*
+    Serial.println("Taking test photo...");
+    camera_fb_t *fb = capturePhoto();
+    if (fb != NULL) {
+      Serial.println("Photo captured successfully");
+      Serial.print("Image size: ");
+      Serial.print(fb->len);
+      Serial.println(" bytes");
+      Serial.println("First 100 bytes (hex):");
+      
+      // Send first 100 bytes (or less if image is smaller)
+      size_t bytes_to_send = (fb->len < 100) ? fb->len : 100;
+      for (size_t i = 0; i < bytes_to_send; i++) {
+        if (fb->buf[i] < 0x10) Serial.print("0");
+        Serial.print(fb->buf[i], HEX);
+        Serial.print(" ");
+        if ((i + 1) % 16 == 0) Serial.println();  // New line every 16 bytes
+      }
+      Serial.println();
+      Serial.println("Test photo complete");
+      
+      esp_camera_fb_return(fb);  // Free the frame buffer
+    } else {
+      Serial.println("Failed to capture test photo");
+    }
+    */
   } else {
     Serial.println("Camera FAILED");
   }
@@ -121,7 +150,7 @@ bool initCamera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_VGA;  // 640x480
-  config.jpeg_quality = 10;  // Lower number = better quality (range 0-63)
+  config.jpeg_quality = 20;  // Lower number = better quality (range 0-63)
   config.fb_count = 2;  // Use 2 buffers for smoother capture at higher resolution
   config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
 
@@ -143,13 +172,13 @@ void stopMotors() {
 
 void wiggle() {
   for (int i = 0; i < 3; i++) {
-    analogWrite(motor1_forward, 100);
-    analogWrite(motor2_reverse, 100);
+    analogWrite(motor2_forward, 100);
+    analogWrite(motor1_reverse, 100);
     delay(150);
     stopMotors();
     delay(100);
-    analogWrite(motor1_reverse, 100);
-    analogWrite(motor2_forward, 100);
+    analogWrite(motor2_reverse, 100);
+    analogWrite(motor1_forward, 100);
     delay(150);
     stopMotors();
     delay(100);
@@ -159,8 +188,8 @@ void wiggle() {
 void moveForward(int duration) {
   stopMotors();
   delay(10);
-  analogWrite(motor1_forward, motor_pwr);
   analogWrite(motor2_forward, motor_pwr);
+  analogWrite(motor1_forward, motor_pwr);
   delay(duration);
   stopMotors();
 }
@@ -168,8 +197,8 @@ void moveForward(int duration) {
 void moveBackward(int duration) {
   stopMotors();
   delay(10);
-  analogWrite(motor1_reverse, motor_pwr);
   analogWrite(motor2_reverse, motor_pwr);
+  analogWrite(motor1_reverse, motor_pwr);
   delay(duration);
   stopMotors();
 }
@@ -177,8 +206,8 @@ void moveBackward(int duration) {
 void turnLeft(int duration) {
   stopMotors();
   delay(10);
-  analogWrite(motor1_reverse, motor_pwr);
-  analogWrite(motor2_forward, motor_pwr);
+  analogWrite(motor2_reverse, motor_pwr);
+  analogWrite(motor1_forward, motor_pwr);
   delay(duration);
   stopMotors();
 }
@@ -186,8 +215,8 @@ void turnLeft(int duration) {
 void turnRight(int duration) {
   stopMotors();
   delay(10);
-  analogWrite(motor1_forward, motor_pwr);
-  analogWrite(motor2_reverse, motor_pwr);
+  analogWrite(motor2_forward, motor_pwr);
+  analogWrite(motor1_reverse, motor_pwr);
   delay(duration);
   stopMotors();
 }

@@ -13,6 +13,7 @@ print(f"Status: {r.status_code} - {r.json()}")
 
 # Test motors
 for action in ["forward", "backward", "left", "right", "stop"]:
+    print(f"Motor {action}...")
     r = requests.get(f"{base_url}/api/motor/{action}")
     time.sleep(1)
     print(f"Motor {action}: {r.status_code} - {r.json()}")

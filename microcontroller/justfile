@@ -1,11 +1,11 @@
 # ESP32-S3-CAM Development Justfile
 
 # Default port and board configuration
-port := "/dev/cu.usbserial-110"
+port := "/dev/cu.usbmodem5B140511681"
 board := "esp32:esp32:esp32s3"
 
 # Board options that work with CH340C on Mac
-# Using QSPI PSRAM (enabled) instead of OPI to avoid WiFi conflicts
+# Testing QSPI PSRAM - OPI was causing boot loops
 board_options := "PSRAM=enabled,UploadSpeed=115200"
 fqbn := board + ":" + board_options
 
