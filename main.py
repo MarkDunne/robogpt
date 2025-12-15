@@ -1,9 +1,9 @@
 """Robot Control Agent - Control a robot via REST API using natural language."""
 
-import os
-import asyncio
 import argparse
+import asyncio
 import base64
+import os
 import time
 from datetime import datetime
 from io import BytesIO
@@ -11,25 +11,25 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import requests
-from pydantic import BaseModel
 from agents import (
     Agent,
-    Runner,
-    function_tool,
-    ToolOutputImage,
     OpenAIResponsesModel,
-    set_tracing_disabled,
+    Runner,
     RunHooks,
-)
-from openai.types.responses import (
-    ResponseTextDeltaEvent,
-    ResponseReasoningTextDeltaEvent,
-    ResponseReasoningSummaryTextDeltaEvent,
+    ToolOutputImage,
+    function_tool,
+    set_tracing_disabled,
 )
 from dotenv import load_dotenv
-from PIL import Image
-from openai import AsyncAzureOpenAI
 from loguru import logger
+from openai import AsyncAzureOpenAI
+from openai.types.responses import (
+    ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningTextDeltaEvent,
+    ResponseTextDeltaEvent,
+)
+from PIL import Image
+from pydantic import BaseModel
 
 load_dotenv()
 set_tracing_disabled(True)
@@ -38,8 +38,18 @@ logger.add(
     lambda msg: print(msg, end=""),
     format="<level>{message}</level>",
     colorize=True,
-    level="INFO",  # DEBUG to see all events, INFO for normal operation
+    level="INFO",
 )
+
+# Motor action to endpoint mapping
+MOTOR_ENDPOINTS = {
+    "forward": "motor/forward",
+    "backward": "motor/backward",
+    "left": "motor/left",
+    "right": "motor/right",
+}
+
+MOVEMENT_TOOLS = {"move_forward", "move_backward", "turn_left", "turn_right"}
 
 client = AsyncAzureOpenAI(
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
@@ -69,13 +79,10 @@ class RobotAPI:
 
     def capture_photo(self) -> ToolOutputImage:
         """Capture and return photo from robot camera."""
-        image = Image.open(
-            BytesIO(
-                requests.get(
-                    f"http://{self.robot_ip}/api/camera/photo", timeout=10
-                ).content
-            )
+        response = requests.get(
+            f"http://{self.robot_ip}/api/camera/photo", timeout=10
         )
+        image = Image.open(BytesIO(response.content))
         image = image.rotate(-90, expand=True)
 
         # Save locally
@@ -87,9 +94,7 @@ class RobotAPI:
         # Convert to base64 for agent
         buffered = BytesIO()
         image.save(buffered, format="JPEG", quality=95)
-        data_url = (
-            f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode()}"
-        )
+        data_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode()}"
 
         return ToolOutputImage(image_url=data_url, detail="auto")
 
@@ -104,6 +109,12 @@ class RobotAPI:
         except Exception as e:
             return f"✗ Failed: {e}"
 
+    def move_and_capture(self, endpoint: str, duration: int) -> ToolOutputImage:
+        """Execute a move and capture photo after settling."""
+        self.call(endpoint, duration=duration)
+        time.sleep(0.2)
+        return self.capture_photo()
+
 
 def create_tools(api: RobotAPI):
     """Create function tools from RobotAPI instance."""
@@ -113,36 +124,28 @@ def create_tools(api: RobotAPI):
         duration: Annotated[int, "Duration in ms (50-5000)"] = 500,
     ) -> ToolOutputImage:
         """Move robot forward and return photo of new location."""
-        api.call("motor/forward", duration=duration)
-        time.sleep(0.2)  # Wait for robot to settle
-        return api.capture_photo()
+        return api.move_and_capture("motor/forward", duration)
 
     @function_tool
     def move_backward(
         duration: Annotated[int, "Duration in ms (50-5000)"] = 500,
     ) -> ToolOutputImage:
         """Move robot backward and return photo of new location."""
-        api.call("motor/backward", duration=duration)
-        time.sleep(0.2)  # Wait for robot to settle
-        return api.capture_photo()
+        return api.move_and_capture("motor/backward", duration)
 
     @function_tool
     def turn_left(
         duration: Annotated[int, "Duration in ms (50-5000)"] = 250,
     ) -> ToolOutputImage:
         """Turn robot left and return photo of new orientation."""
-        api.call("motor/left", duration=duration)
-        time.sleep(0.2)  # Wait for robot to settle
-        return api.capture_photo()
+        return api.move_and_capture("motor/left", duration)
 
     @function_tool
     def turn_right(
         duration: Annotated[int, "Duration in ms (50-5000)"] = 250,
     ) -> ToolOutputImage:
         """Turn robot right and return photo of new orientation."""
-        api.call("motor/right", duration=duration)
-        time.sleep(0.2)  # Wait for robot to settle
-        return api.capture_photo()
+        return api.move_and_capture("motor/right", duration)
 
     @function_tool
     def stop_motors() -> str:
@@ -156,6 +159,7 @@ def create_tools(api: RobotAPI):
 
     class Move(BaseModel):
         """A single robot movement."""
+
         action: Literal["forward", "backward", "left", "right"]
         duration: int
 
@@ -163,81 +167,108 @@ def create_tools(api: RobotAPI):
     def execute_moves(
         moves: Annotated[
             list[Move],
-            "List of moves to execute. Example: [{'action': 'forward', 'duration': 500}, {'action': 'right', 'duration': 250}]"
+            "List of moves to execute. Example: [{'action': 'forward', 'duration': 500}, {'action': 'right', 'duration': 250}]",
         ]
     ) -> ToolOutputImage:
-        """Execute a sequence of movements and return photo of final position. Use this for efficient multi-step navigation."""
+        """Execute a sequence of movements and return photo of final position."""
         for i, move in enumerate(moves):
-            action = move.action.lower()
-            duration = move.duration
-
-            # Map action to motor endpoint
-            endpoint_map = {
-                "forward": "motor/forward",
-                "backward": "motor/backward",
-                "left": "motor/left",
-                "right": "motor/right",
-            }
-
-            if action not in endpoint_map:
-                logger.warning(f"Unknown action '{action}' in move {i+1}, skipping")
+            endpoint = MOTOR_ENDPOINTS.get(move.action.lower())
+            if not endpoint:
+                logger.warning(f"Unknown action '{move.action}' in move {i+1}, skipping")
                 continue
 
-            # Execute the move
-            api.call(endpoint_map[action], duration=duration)
+            api.call(endpoint, duration=move.duration)
 
-            # Small delay between moves for robot stability
-            if i < len(moves) - 1:  # Don't wait after the last move
+            # Small delay between moves for stability (skip after last move)
+            if i < len(moves) - 1:
                 time.sleep(0.1)
 
-        # Wait for robot to settle after final move
         time.sleep(0.2)
-
-        # Capture and return final photo
         return api.capture_photo()
 
-    return [move_forward, move_backward, turn_left, turn_right, stop_motors, get_status, execute_moves]
+    return [
+        move_forward,
+        move_backward,
+        turn_left,
+        turn_right,
+        stop_motors,
+        get_status,
+        execute_moves,
+    ]
 
 
 class ContextPruningHooks(RunHooks):
-    """Prune context to keep only recent moves and a summary of older ones."""
+    """Prune context to keep only recent turns and summarize older ones."""
 
     def __init__(self, keep_recent_turns: int = 5):
         self.keep_recent_turns = keep_recent_turns
-        self.move_history = []
+        self.move_history: list[str] = []
 
     async def on_run_turn_done(self, context, result):
         """After each turn, prune the context window."""
         # Track movements
         for item in result.new_items:
-            if hasattr(item, "type") and item.type == "tool_call_item":
-                tool_name = item.name if hasattr(item, "name") else "unknown"
-                if tool_name in [
-                    "move_forward",
-                    "move_backward",
-                    "turn_left",
-                    "turn_right",
-                ]:
+            if getattr(item, "type", None) == "tool_call_item":
+                tool_name = getattr(item, "name", "unknown")
+                if tool_name in MOVEMENT_TOOLS:
                     self.move_history.append(tool_name)
 
-        # If we have more than keep_recent_turns worth of context, prune
-        if (
-            len(result.all_items) > self.keep_recent_turns * 4
-        ):  # ~4 items per turn (tool call + output + message)
-            # Keep initial message, recent items, and inject a summary
-            total_items = len(result.all_items)
-            keep_recent = self.keep_recent_turns * 4
+        # Prune if context exceeds threshold (~4 items per turn)
+        items_threshold = self.keep_recent_turns * 4
+        if len(result.all_items) > items_threshold:
+            keep_recent = items_threshold
+            pruned_count = len(result.all_items) - keep_recent - 1
 
-            # Create summary of pruned moves
-            pruned_count = total_items - keep_recent - 1
             if pruned_count > 0:
-                summary = f"[Context pruned: {pruned_count} items removed. Recent moves: {', '.join(self.move_history[-10:])}]"
-                logger.info(f"🔄 {summary}")
+                recent_moves = ", ".join(self.move_history[-10:])
+                logger.info(f"🔄 Context pruned: {pruned_count} items removed. Recent: {recent_moves}")
 
-            # Prune: keep first item (initial photo+task) and recent items
+            # Keep first item (initial photo+task) and recent items
             result.all_items = [result.all_items[0]] + result.all_items[-keep_recent:]
 
         return result
+
+
+AGENT_INSTRUCTIONS = """You are an intelligent robot control agent for physical robot operations.
+
+Capabilities: Move (forward/backward/left/right, 50-5000ms), stop motors, check status, execute multiple moves in sequence.
+
+IMPORTANT BEHAVIOR:
+- Robot is in a safe environment. Execute commands IMMEDIATELY without asking permission.
+- ALL movement commands automatically return a photo of the new location/orientation.
+- You will receive an initial photo at the start showing the current view.
+- Use the photos returned from movements to understand what the robot sees and plan next actions.
+- Older context may be pruned to maintain performance - rely on recent photos for current state.
+
+EFFICIENCY TIP:
+- Use execute_moves() to batch 2-4 movements together when you have a clear plan
+- Example: execute_moves([{'action': 'forward', 'duration': 800}, {'action': 'right', 'duration': 250}])
+- This is MUCH faster than individual moves but less adaptive
+- Use single moves when you need to check the environment frequently
+
+Task approach:
+1. Analyze the current/most recent photo to understand position
+2. Plan 2-3 moves ahead based on what you see
+3. If confident, use execute_moves() to batch them
+4. If uncertain, use single moves and observe photos between
+5. Adjust strategy based on latest visual feedback
+
+Duration guidelines:
+- Short: 200-500ms | Medium: 500-1500ms | Long: 1500-3000ms
+- Turns: 250ms (~45-60°) | 90° turns: 400-500ms
+- Robot has momentum - for precise short turns use as low as 50ms"""
+
+
+def extract_reasoning_text(content) -> str | None:
+    """Extract text from reasoning content (may be string, list, or other)."""
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    if isinstance(content, str):
+        return content
+    return str(content) if content else None
 
 
 async def run_robot_agent(robot_ip: str, task: str):
@@ -246,47 +277,18 @@ async def run_robot_agent(robot_ip: str, task: str):
 
     agent = Agent(
         name="Robot Controller",
-        instructions="""You are an Intelligent robot control agent for physical robot operations.
-
-        Capabilities: Move (forward/backward/left/right, 50-5000ms), stop motors, check status, execute multiple moves in sequence.
-
-        IMPORTANT BEHAVIOR:
-        - Robot is in a safe environment. Execute commands IMMEDIATELY without asking permission.
-        - ALL movement commands automatically return a photo of the new location/orientation.
-        - You will receive an initial photo at the start showing the current view.
-        - Use the photos returned from movements to understand what the robot sees and plan next actions.
-        - Older context may be pruned to maintain performance - rely on recent photos for current state.
-
-        EFFICIENCY TIP:
-        - Use execute_moves() to batch 2-4 movements together when you have a clear plan
-        - Example: execute_moves([{'action': 'forward', 'duration': 800}, {'action': 'right', 'duration': 250}])
-        - This is MUCH faster than individual moves but less adaptive
-        - Use single moves when you need to check the environment frequently
-
-        Task approach:
-        1. Analyze the current/most recent photo to understand position
-        2. Plan 2-3 moves ahead based on what you see
-        3. If confident, use execute_moves() to batch them
-        4. If uncertain, use single moves and observe photos between
-        5. Adjust strategy based on latest visual feedback
-
-        Duration guidelines:
-        - Short: 200-500ms | Medium: 500-1500ms | Long: 1500-3000ms
-        - Turns: 250ms (~45-60°) | 90° turns: 400-500ms
-        - Robot has momentum - for precise short turns use as low as 50ms""",
+        instructions=AGENT_INSTRUCTIONS,
         tools=create_tools(api),
         model=OpenAIResponsesModel(model="gpt-5", openai_client=client),
     )
 
-    print(
-        f"\n{'=' * 60}\n🤖 Robot Control Agent\n{'=' * 60}\nRobot IP: {robot_ip}\nTask: {task}\n{'=' * 60}\n"
-    )
+    print(f"\n{'=' * 60}\n🤖 Robot Control Agent\n{'=' * 60}")
+    print(f"Robot IP: {robot_ip}\nTask: {task}\n{'=' * 60}\n")
 
     # Capture initial photo and send with task
     logger.info("📸 Capturing initial robot view...")
     initial_photo = api.capture_photo()
 
-    # Create a message with image and text content
     message_input = {
         "type": "message",
         "role": "user",
@@ -300,93 +302,61 @@ async def run_robot_agent(robot_ip: str, task: str):
         ],
     }
 
-    # Use context pruning to prevent slowdowns
     hooks = ContextPruningHooks(keep_recent_turns=5)
-    result_stream = Runner.run_streamed(
-        agent, [message_input], max_turns=100, hooks=hooks
-    )
+    result_stream = Runner.run_streamed(agent, [message_input], max_turns=100, hooks=hooks)
 
     print("\n💭 Agent Thinking:\n" + "-" * 60)
-
-    # Track if we've seen any text output
     seen_text = False
 
     async for event in result_stream.stream_events():
         if event.type == "raw_response_event":
-            # Stream reasoning tokens (internal thinking)
-            if isinstance(event.data, ResponseReasoningTextDeltaEvent):
-                print(
-                    f"\033[2m{event.data.delta}\033[0m", end="", flush=True
-                )  # Dim text for reasoning
-                seen_text = True
+            delta = getattr(event.data, "delta", None)
+            if delta:
+                if isinstance(event.data, ResponseReasoningTextDeltaEvent):
+                    print(f"\033[2m{delta}\033[0m", end="", flush=True)
+                    seen_text = True
+                elif isinstance(event.data, ResponseReasoningSummaryTextDeltaEvent):
+                    print(f"\033[36m{delta}\033[0m", end="", flush=True)
+                    seen_text = True
+                elif isinstance(event.data, ResponseTextDeltaEvent):
+                    print(delta, end="", flush=True)
+                    seen_text = True
 
-            # Stream reasoning summary
-            elif isinstance(event.data, ResponseReasoningSummaryTextDeltaEvent):
-                print(
-                    f"\033[36m{event.data.delta}\033[0m", end="", flush=True
-                )  # Cyan for summary
-                seen_text = True
-
-            # Stream agent output token-by-token
-            elif isinstance(event.data, ResponseTextDeltaEvent):
-                print(event.data.delta, end="", flush=True)
-                seen_text = True
-
-        # Show tool calls as they happen
         elif event.type == "run_item_stream_event":
-            if event.item.type == "reasoning_item":
-                # Extract reasoning content from the item
-                reasoning_text = None
-                if hasattr(event.item, "content"):
-                    content = event.item.content
-                    # Content might be a list of content parts
-                    if isinstance(content, list):
-                        reasoning_text = "".join([
-                            part.get("text", "") if isinstance(part, dict) else str(part)
-                            for part in content
-                        ])
-                    elif isinstance(content, str):
-                        reasoning_text = content
-                    else:
-                        reasoning_text = str(content)
+            item_type = getattr(event.item, "type", None)
 
+            if item_type == "reasoning_item":
+                content = getattr(event.item, "content", None)
+                reasoning_text = extract_reasoning_text(content)
                 if reasoning_text and reasoning_text.strip():
                     print(f"\n\033[2m💭 {reasoning_text}\033[0m\n", flush=True)
                     seen_text = True
                 else:
-                    # Debug: show what we got
-                    logger.debug(f"reasoning_item content: {event.item.content if hasattr(event.item, 'content') else 'NO CONTENT'}")
+                    logger.debug(f"reasoning_item content: {content}")
 
-            elif event.item.type == "tool_call_item":
-                tool_name = (
-                    event.item.name if hasattr(event.item, "name") else "unknown"
-                )
-                # Add newline only if we've printed text before
+            elif item_type == "tool_call_item":
                 if seen_text:
                     print()
+                tool_name = getattr(event.item, "name", "unknown")
                 print(f"🔧 [{tool_name}] ", end="", flush=True)
                 seen_text = False
-            elif event.item.type == "tool_call_output_item":
+
+            elif item_type == "tool_call_output_item":
                 print("✓", flush=True)
-            elif event.item.type == "message_output_item":
-                # Extract and show any text content from the message
-                if hasattr(event.item, "content") and event.item.content:
-                    message_text = (
-                        event.item.content
-                        if isinstance(event.item.content, str)
-                        else str(event.item.content)
-                    )
-                    if message_text and message_text.strip():
+
+            elif item_type == "message_output_item":
+                content = getattr(event.item, "content", None)
+                if content:
+                    message_text = content if isinstance(content, str) else str(content)
+                    if message_text.strip():
                         print(f"\n💬 {message_text}", flush=True)
                         seen_text = True
-                # Agent's message completed - add separator
                 elif seen_text:
-                    print("\n", end="", flush=True)
+                    print()
                     seen_text = False
 
-    print(
-        f"\n{'-' * 60}\n\n{'=' * 60}\n📋 Final Response:\n{'=' * 60}\n{result_stream.final_output}\n{'=' * 60}\n"
-    )
+    print(f"\n{'-' * 60}\n\n{'=' * 60}\n📋 Final Response:\n{'=' * 60}")
+    print(f"{result_stream.final_output}\n{'=' * 60}\n")
 
 
 def main():
