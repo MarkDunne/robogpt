@@ -57,35 +57,6 @@ void setup() {
   camera_initialized = initCamera();
   if (camera_initialized) {
     Serial.println("Camera OK");
-    
-    // TEMPORARILY DISABLED: Boot photo capture for testing
-    // Take a test photo on boot and send first 100 bytes to serial
-    /*
-    Serial.println("Taking test photo...");
-    camera_fb_t *fb = capturePhoto();
-    if (fb != NULL) {
-      Serial.println("Photo captured successfully");
-      Serial.print("Image size: ");
-      Serial.print(fb->len);
-      Serial.println(" bytes");
-      Serial.println("First 100 bytes (hex):");
-      
-      // Send first 100 bytes (or less if image is smaller)
-      size_t bytes_to_send = (fb->len < 100) ? fb->len : 100;
-      for (size_t i = 0; i < bytes_to_send; i++) {
-        if (fb->buf[i] < 0x10) Serial.print("0");
-        Serial.print(fb->buf[i], HEX);
-        Serial.print(" ");
-        if ((i + 1) % 16 == 0) Serial.println();  // New line every 16 bytes
-      }
-      Serial.println();
-      Serial.println("Test photo complete");
-      
-      esp_camera_fb_return(fb);  // Free the frame buffer
-    } else {
-      Serial.println("Failed to capture test photo");
-    }
-    */
   } else {
     Serial.println("Camera FAILED");
   }

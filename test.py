@@ -31,5 +31,5 @@ else:
     try:
         error_msg = r.json()
         print(f"Camera: {r.status_code} - {error_msg}")
-    except:
+    except Exception:
         print(f"Camera: {r.status_code} - FAILED ({r.text[:200]})")

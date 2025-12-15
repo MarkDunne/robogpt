@@ -10,3 +10,5 @@ wheels/
 .venv
 photos/
 imgs/
+.env
+.DS_Store

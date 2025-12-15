@@ -4,6 +4,7 @@ import os
 import asyncio
 import argparse
 import base64
+import time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -113,8 +114,6 @@ def create_tools(api: RobotAPI):
     ) -> ToolOutputImage:
         """Move robot forward and return photo of new location."""
         api.call("motor/forward", duration=duration)
-        import time
-
         time.sleep(0.2)  # Wait for robot to settle
         return api.capture_photo()
 
@@ -124,8 +123,6 @@ def create_tools(api: RobotAPI):
     ) -> ToolOutputImage:
         """Move robot backward and return photo of new location."""
         api.call("motor/backward", duration=duration)
-        import time
-
         time.sleep(0.2)  # Wait for robot to settle
         return api.capture_photo()
 
@@ -135,8 +132,6 @@ def create_tools(api: RobotAPI):
     ) -> ToolOutputImage:
         """Turn robot left and return photo of new orientation."""
         api.call("motor/left", duration=duration)
-        import time
-
         time.sleep(0.2)  # Wait for robot to settle
         return api.capture_photo()
 
@@ -146,8 +141,6 @@ def create_tools(api: RobotAPI):
     ) -> ToolOutputImage:
         """Turn robot right and return photo of new orientation."""
         api.call("motor/right", duration=duration)
-        import time
-
         time.sleep(0.2)  # Wait for robot to settle
         return api.capture_photo()
 
@@ -174,8 +167,6 @@ def create_tools(api: RobotAPI):
         ]
     ) -> ToolOutputImage:
         """Execute a sequence of movements and return photo of final position. Use this for efficient multi-step navigation."""
-        import time
-
         for i, move in enumerate(moves):
             action = move.action.lower()
             duration = move.duration
